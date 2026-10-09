@@ -1,0 +1,1604 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bookzine & Mini-Zine Creator (Aplicación Portátil HTML)</title>
+  <meta name="description" content="Aplicación portátil para crear fanzines y bookzines imponiendo páginas PDF en plantillas de 8 y 16 páginas." />
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- PDF.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- PDF-Lib -->
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <!-- React & ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel Standalone -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    @keyframes fadeIn {
+      from { opacity: 0; transform: scale(0.98); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .animate-fade-in { animation: fadeIn 0.15s ease-out forwards; }
+  </style>
+</head>
+<body class="bg-slate-100/70 text-slate-800 min-h-screen flex flex-col font-sans">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+    const { degrees, PDFDocument, rgb } = PDFLib;
+
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+
+    // Grid 8 páginas (Fila 1: 1, 8, 7, 6 a 180° / Fila 2: 2, 3, 4, 5 a 0°)
+    const DEFAULT_ZINE8_GRID = [
+      { slotIndex: 0, row: 0, col: 0, relativePage: 1, rotation: 180 },
+      { slotIndex: 1, row: 0, col: 1, relativePage: 8, rotation: 180 },
+      { slotIndex: 2, row: 0, col: 2, relativePage: 7, rotation: 180 },
+      { slotIndex: 3, row: 0, col: 3, relativePage: 6, rotation: 180 },
+      { slotIndex: 4, row: 1, col: 0, relativePage: 2, rotation: 0 },
+      { slotIndex: 5, row: 1, col: 1, relativePage: 3, rotation: 0 },
+      { slotIndex: 6, row: 1, col: 2, relativePage: 4, rotation: 0 },
+      { slotIndex: 7, row: 1, col: 3, relativePage: 5, rotation: 0 },
+    ];
+
+    // Grid 16 páginas (Snake fold)
+    const DEFAULT_BOOKZINE_GRID = [
+      { slotIndex: 0, row: 0, col: 0, relativePage: 3, rotation: 180 },
+      { slotIndex: 1, row: 0, col: 1, relativePage: 2, rotation: 180 },
+      { slotIndex: 2, row: 0, col: 2, relativePage: 1, rotation: 180 },
+      { slotIndex: 3, row: 0, col: 3, relativePage: 16, rotation: 180 },
+      { slotIndex: 4, row: 1, col: 0, relativePage: 4, rotation: 0 },
+      { slotIndex: 5, row: 1, col: 1, relativePage: 5, rotation: 0 },
+      { slotIndex: 6, row: 1, col: 2, relativePage: 6, rotation: 0 },
+      { slotIndex: 7, row: 1, col: 3, relativePage: 7, rotation: 0 },
+      { slotIndex: 8, row: 2, col: 0, relativePage: 11, rotation: 180 },
+      { slotIndex: 9, row: 2, col: 1, relativePage: 10, rotation: 180 },
+      { slotIndex: 10, row: 2, col: 2, relativePage: 9, rotation: 180 },
+      { slotIndex: 11, row: 2, col: 3, relativePage: 8, rotation: 180 },
+      { slotIndex: 12, row: 3, col: 0, relativePage: 12, rotation: 0 },
+      { slotIndex: 13, row: 3, col: 1, relativePage: 13, rotation: 0 },
+      { slotIndex: 14, row: 3, col: 2, relativePage: 14, rotation: 0 },
+      { slotIndex: 15, row: 3, col: 3, relativePage: 15, rotation: 0 },
+    ];
+
+    function createBlankPage(pageNumber = 1, width = 800, height = 1131) {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+      }
+      return {
+        id: `blank-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+        pageNumber,
+        originalPageNumber: 0,
+        isBlank: true,
+        dataUrl: canvas.toDataURL('image/jpeg', 0.95),
+        width,
+        height,
+      };
+    }
+
+    function App() {
+      const [impositionMode, setImpositionMode] = useState('zine8');
+      const [sourceFile, setSourceFile] = useState(null);
+      const [extractedPages, setExtractedPages] = useState([]);
+      const [isExtracting, setIsExtracting] = useState(false);
+      const [extractProgress, setExtractProgress] = useState({ current: 0, total: 0 });
+
+      // Configuración del pliego
+      const [sheetConfig, setSheetConfig] = useState({
+        sheetSize: 'A3',
+        orientation: 'landscape',
+        marginPercent: 2,
+        gapPercent: 0.6,
+        fitMode: 'contain',
+        showFoldGuides: true,
+        showPageLabels: true,
+        showSheetBorder: true,
+        sheetBorderStyle: 'dotted',
+        sheetBorderPosition: 'margin',
+      });
+
+      const [gridSlots, setGridSlots] = useState(DEFAULT_ZINE8_GRID);
+      const [slotOverrides, setSlotOverrides] = useState({});
+      const [activeSheetIndex, setActiveSheetIndex] = useState(0);
+
+      // Reordering state
+      const [draggedIdx, setDraggedIdx] = useState(null);
+      const [dragOverIdx, setDragOverIdx] = useState(null);
+      const [movingPageTarget, setMovingPageTarget] = useState(null);
+      const [blankModalTarget, setBlankModalTarget] = useState(null);
+      const [targetPosInput, setTargetPosInput] = useState(1);
+      const [isExporting, setIsExporting] = useState(false);
+      const [isFoldingGuideOpen, setIsFoldingGuideOpen] = useState(false);
+      const [guideActiveTab, setGuideActiveTab] = useState(impositionMode);
+      const [guideStep, setGuideStep] = useState(0);
+      const [guidePlaying, setGuidePlaying] = useState(false);
+
+      React.useEffect(() => {
+        setGuideActiveTab(impositionMode);
+      }, [impositionMode, isFoldingGuideOpen]);
+
+      React.useEffect(() => {
+        if (!guidePlaying) return;
+        const total = 5;
+        const timer = setInterval(() => {
+          setGuideStep((prev) => (prev >= total - 1 ? 0 : prev + 1));
+        }, 3000);
+        return () => clearInterval(timer);
+      }, [guidePlaying]);
+
+      const pagesPerSheet = impositionMode === 'zine8' ? 8 : 16;
+      const totalPages = extractedPages.length;
+      const totalSheets = Math.max(1, Math.ceil(totalPages / pagesPerSheet));
+
+      const handleModeChange = (mode) => {
+        setImpositionMode(mode);
+        setGridSlots(mode === 'zine8' ? DEFAULT_ZINE8_GRID : DEFAULT_BOOKZINE_GRID);
+        setSlotOverrides({});
+      };
+
+      const handleFileUpload = async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setSourceFile(file);
+        setIsExtracting(true);
+        try {
+          const buffer = await file.arrayBuffer();
+          const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+          const numPages = pdf.numPages;
+          const pages = [];
+          for (let i = 1; i <= numPages; i++) {
+            setExtractProgress({ current: i, total: numPages });
+            const page = await pdf.getPage(i);
+            const viewport = page.getViewport({ scale: 1.5 });
+            const canvas = document.createElement('canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            pages.push({
+              id: `p-${i}-${Date.now()}`,
+              pageNumber: i,
+              originalPageNumber: i,
+              isBlank: false,
+              dataUrl: canvas.toDataURL('image/jpeg', 0.9),
+              width: viewport.width,
+              height: viewport.height,
+            });
+          }
+          setExtractedPages(pages);
+        } catch (err) {
+          alert('Error procesando el PDF: ' + err.message);
+        } finally {
+          setIsExtracting(false);
+        }
+      };
+
+      const handleLoadDemo = (count = 16) => {
+        setIsExtracting(true);
+        const demoPages = [];
+        const colors = [
+          '#ef4444', '#f97316', '#eab308', '#10b981',
+          '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899',
+          '#059669', '#d97706', '#4f46e5', '#db2777',
+          '#65a30d', '#ea580c', '#0284c7', '#7c3aed'
+        ];
+        for (let i = 1; i <= count; i++) {
+          const canvas = document.createElement('canvas');
+          canvas.width = 600;
+          canvas.height = 840;
+          const ctx = canvas.getContext('2d');
+          const color = colors[(i - 1) % colors.length];
+
+          // Background
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, 600, 840);
+
+          // Top Header bar
+          ctx.fillStyle = color;
+          ctx.fillRect(0, 0, 600, 160);
+
+          // Header Text
+          ctx.fillStyle = '#ffffff';
+          ctx.font = 'bold 34px sans-serif';
+          ctx.textAlign = 'center';
+          if (i === 1) {
+            ctx.fillText('PORTADA • PÁGINA 1', 300, 95);
+          } else if (i === count) {
+            ctx.fillText(`CONTRAPORTADA • PÁG ${count}`, 300, 95);
+          } else {
+            ctx.fillText(`PÁGINA ${i}`, 300, 95);
+          }
+
+          // Central circle badge
+          ctx.fillStyle = color + '22';
+          ctx.beginPath();
+          ctx.arc(300, 450, 130, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = color;
+          ctx.font = 'bold 110px sans-serif';
+          ctx.fillText(`${i}`, 300, 490);
+
+          // Subtitle / text
+          ctx.fillStyle = '#334155';
+          ctx.font = 'bold 24px sans-serif';
+          ctx.fillText(i === 1 ? '¡Mi Bookzine Fanzine!' : i === count ? 'Fin de la Edición' : `Contenido Sección ${i}`, 300, 650);
+
+          ctx.fillStyle = '#94a3b8';
+          ctx.font = '16px sans-serif';
+          ctx.fillText(`Plantilla de Imposición • ${count} Páginas`, 300, 690);
+
+          // Border
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 10;
+          ctx.strokeRect(5, 5, 590, 830);
+
+          demoPages.push({
+            id: `demo-${i}-${Date.now()}`,
+            pageNumber: i,
+            originalPageNumber: i,
+            isBlank: false,
+            dataUrl: canvas.toDataURL('image/jpeg', 0.9),
+            width: 600,
+            height: 840,
+          });
+        }
+        setExtractedPages(demoPages);
+        setSourceFile({ name: `Demo_Fanzine_${count}p.pdf` });
+        setIsExtracting(false);
+      };
+
+      const downloadSelfHtml = () => {
+        const fullHtml = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+        const blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'fanzine_creator.html';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      };
+
+      // Mover página de fromIdx a toIdx
+      const movePage = (fromIdx, toIdx) => {
+        if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0) return;
+        setExtractedPages((prev) => {
+          if (fromIdx >= prev.length || toIdx >= prev.length) return prev;
+          const updated = [...prev];
+          const [item] = updated.splice(fromIdx, 1);
+          updated.splice(toIdx, 0, item);
+          return updated.map((p, idx) => ({ ...p, pageNumber: idx + 1 }));
+        });
+      };
+
+      // Intercambiar dos páginas
+      const swapPages = (idxA, idxB) => {
+        if (idxA === idxB || idxA < 0 || idxB < 0) return;
+        setExtractedPages((prev) => {
+          if (idxA >= prev.length || idxB >= prev.length) return prev;
+          const updated = [...prev];
+          const temp = updated[idxA];
+          updated[idxA] = updated[idxB];
+          updated[idxB] = temp;
+          return updated.map((p, idx) => ({ ...p, pageNumber: idx + 1 }));
+        });
+      };
+
+      // Insertar página en blanco
+      const insertBlankPage = (insertIndex, count = 1) => {
+        setExtractedPages((prev) => {
+          const w = prev[0]?.width || 800;
+          const h = prev[0]?.height || 1131;
+          const target = Math.max(0, Math.min(insertIndex, prev.length));
+          const blanks = Array.from({ length: count }, (_, i) => createBlankPage(target + 1 + i, w, h));
+          const updated = [...prev];
+          updated.splice(target, 0, ...blanks);
+          return updated.map((p, idx) => ({ ...p, pageNumber: idx + 1 }));
+        });
+      };
+
+      // Eliminar página
+      const removePage = (index) => {
+        setExtractedPages((prev) => {
+          const updated = prev.filter((_, idx) => idx !== index);
+          return updated.map((p, idx) => ({ ...p, pageNumber: idx + 1 }));
+        });
+      };
+
+      // Mover pliego completo
+      const moveSheet = (fromSheet, toSheet) => {
+        if (fromSheet === toSheet || fromSheet < 0 || toSheet < 0) return;
+        setExtractedPages((prev) => {
+          const sCount = Math.ceil(prev.length / pagesPerSheet);
+          if (fromSheet >= sCount || toSheet >= sCount) return prev;
+          const sheets = [];
+          for (let s = 0; s < sCount; s++) {
+            sheets.push(prev.slice(s * pagesPerSheet, (s + 1) * pagesPerSheet));
+          }
+          const [moved] = sheets.splice(fromSheet, 1);
+          sheets.splice(toSheet, 0, moved);
+          return sheets.flat().map((p, idx) => ({ ...p, pageNumber: idx + 1 }));
+        });
+        setActiveSheetIndex(toSheet);
+      };
+
+      // Exportar PDF
+      const exportPdf = async () => {
+        if (extractedPages.length === 0) return;
+        setIsExporting(true);
+        try {
+          const outDoc = await PDFDocument.create();
+          const isLandscape = sheetConfig.orientation === 'landscape';
+          // A3 points
+          const baseW = 1190.55;
+          const baseH = 841.89;
+          const sheetW = isLandscape ? Math.max(baseW, baseH) : Math.min(baseW, baseH);
+          const sheetH = isLandscape ? Math.min(baseW, baseH) : Math.max(baseW, baseH);
+
+          const colsCount = Math.max(...gridSlots.map((s) => s.col)) + 1;
+          const rowsCount = Math.max(...gridSlots.map((s) => s.row)) + 1;
+
+          const marginX = sheetW * (sheetConfig.marginPercent / 100);
+          const marginY = sheetH * (sheetConfig.marginPercent / 100);
+          const availableW = sheetW - 2 * marginX;
+          const availableH = sheetH - 2 * marginY;
+          const gapX = availableW * (sheetConfig.gapPercent / 100);
+          const gapY = availableH * (sheetConfig.gapPercent / 100);
+          const cellW = (availableW - (colsCount - 1) * gapX) / colsCount;
+          const cellH = (availableH - (rowsCount - 1) * gapY) / rowsCount;
+
+          // Embed images
+          const embeddedMap = new Map();
+          for (const p of extractedPages) {
+            if (p.isBlank) continue;
+            const res = await fetch(p.dataUrl);
+            const buffer = await res.arrayBuffer();
+            const img = await outDoc.embedJpg(buffer);
+            embeddedMap.set(p.pageNumber, { img, w: p.width, h: p.height });
+          }
+
+          for (let s = 0; s < totalSheets; s++) {
+            const outPage = outDoc.addPage([sheetW, sheetH]);
+            const baseOffset = s * pagesPerSheet;
+
+            // Dotted border around sheet
+            if (sheetConfig.showSheetBorder) {
+              const isDashed = sheetConfig.sheetBorderStyle === 'dashed';
+              const borderDash = isDashed ? [5, 4] : [2, 3];
+              const isEdge = sheetConfig.sheetBorderPosition === 'edge';
+              const bX0 = isEdge ? 12 : Math.max(12, marginX);
+              const bY0 = isEdge ? 12 : Math.max(12, marginY);
+              const bX1 = isEdge ? sheetW - 12 : Math.min(sheetW - 12, sheetW - marginX);
+              const bY1 = isEdge ? sheetH - 12 : Math.min(sheetH - 12, sheetH - marginY);
+              const color = rgb(0.55, 0.55, 0.55);
+
+              outPage.drawLine({ start: { x: bX0, y: bY0 }, end: { x: bX1, y: bY0 }, thickness: 0.8, color, dashArray: borderDash });
+              outPage.drawLine({ start: { x: bX0, y: bY1 }, end: { x: bX1, y: bY1 }, thickness: 0.8, color, dashArray: borderDash });
+              outPage.drawLine({ start: { x: bX0, y: bY0 }, end: { x: bX0, y: bY1 }, thickness: 0.8, color, dashArray: borderDash });
+              outPage.drawLine({ start: { x: bX1, y: bY0 }, end: { x: bX1, y: bY1 }, thickness: 0.8, color, dashArray: borderDash });
+            }
+
+            // Central slit line for 8-page zine
+            if (rowsCount === 2 && colsCount === 4 && sheetConfig.showFoldGuides) {
+              const midY = sheetH - (marginY + 1 * (cellH + gapY) - gapY / 2);
+              const cutStartX = marginX + 1 * (cellW + gapX);
+              const cutEndX = marginX + 3 * (cellW + gapX) - gapX;
+              outPage.drawLine({
+                start: { x: cutStartX, y: midY },
+                end: { x: cutEndX, y: midY },
+                thickness: 1.2,
+                color: rgb(0.8, 0.25, 0.25),
+                dashArray: [5, 3],
+              });
+            }
+
+            // Draw slots
+            for (const slot of gridSlots) {
+              const targetPageNum = baseOffset + slot.relativePage;
+              if (targetPageNum > totalPages) continue;
+
+              const embedded = embeddedMap.get(targetPageNum);
+              if (!embedded) continue;
+
+              const override = slotOverrides[`${s}_${slot.slotIndex}`];
+              const effectiveRot = override !== undefined ? override : slot.rotation;
+              const isTransposed = effectiveRot === 90 || effectiveRot === 270;
+
+              let scale = Math.min(cellW / (isTransposed ? embedded.h : embedded.w), cellH / (isTransposed ? embedded.w : embedded.h));
+              const drawW = embedded.w * scale;
+              const drawH = embedded.h * scale;
+
+              const nominalCx = marginX + slot.col * (cellW + gapX) + cellW / 2;
+              const nominalCy = sheetH - marginY - (slot.row + 1) * cellH - slot.row * gapY + cellH / 2;
+
+              const pdfAngle = (360 - effectiveRot) % 360;
+              const rad = (pdfAngle * Math.PI) / 180;
+              const cos = Math.cos(rad);
+              const sin = Math.sin(rad);
+              const x = nominalCx - (drawW / 2) * cos + (drawH / 2) * sin;
+              const y = nominalCy - (drawW / 2) * sin - (drawH / 2) * cos;
+
+              outPage.drawImage(embedded.img, { x, y, width: drawW, height: drawH, rotate: degrees(pdfAngle) });
+            }
+          }
+
+          const pdfBytes = await outDoc.save();
+          const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `Fanzine_${impositionMode}_Impresion.pdf`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        } catch (e) {
+          alert('Error exportando PDF: ' + e.message);
+        } finally {
+          setIsExporting(false);
+        }
+      };
+
+      const colsCount = Math.max(...gridSlots.map((s) => s.col)) + 1;
+      const rowsCount = Math.max(...gridSlots.map((s) => s.row)) + 1;
+      const baseOffset = activeSheetIndex * pagesPerSheet;
+
+      return (
+        <div className="flex-1 flex flex-col">
+          {/* Header */}
+          <header className="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-xs">
+            <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center font-bold text-lg shadow-sm">
+                  📖
+                </div>
+                <div>
+                  <h1 className="text-base font-bold text-slate-900 leading-tight">
+                    Bookzine & Mini-Zine Creator (HTML Standalone)
+                  </h1>
+                  <p className="text-xs text-slate-500">
+                    Imposición para fanzines • Portátil 100% offline
+                  </p>
+                </div>
+              </div>
+
+              {/* Mode switch */}
+              <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => handleModeChange('zine8')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    impositionMode === 'zine8'
+                      ? 'bg-purple-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  8 Pliegues (4x2 Canva)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleModeChange('bookzine16')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                    impositionMode === 'bookzine16'
+                      ? 'bg-amber-600 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  16 Pliegues (4x4 Snake)
+                </button>
+              </div>
+
+              {/* Canva Template Link */}
+              <a
+                href={impositionMode === 'zine8' ? 'https://canva.link/1ix23ya28nko1k8' : 'https://canva.link/d2a98lgqsfyogye'}
+                target="_blank"
+                rel="noreferrer"
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 transition-colors"
+              >
+                Abrir plantilla en Canva ↗
+              </a>
+
+              {/* Guardar/Descargar archivo HTML autónomo */}
+              <button
+                type="button"
+                onClick={downloadSelfHtml}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-2xs flex items-center gap-1.5 cursor-pointer"
+                title="Descargar este archivo HTML autónomo para guardarlo y usarlo en cualquier lugar sin conexión"
+              >
+                <span>💾 Guardar App (.html)</span>
+              </button>
+
+              {/* Folding guide animation button */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsFoldingGuideOpen(true);
+                  setGuideStep(0);
+                  setGuidePlaying(false);
+                }}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-amber-50 to-orange-50 hover:from-amber-100 text-amber-900 border border-amber-300 shadow-2xs flex items-center gap-1.5 cursor-pointer"
+                title="Ver animación interactiva paso a paso de cómo plegar el bookzine seleccionado"
+              >
+                <span>▶ ¿Cómo se pliega? (Animación)</span>
+              </button>
+            </div>
+          </header>
+
+          {/* Main Content */}
+          <main className="max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6 flex-1">
+            {/* Step 1 & 2 Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Upload & Sequence Strip */}
+              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                  <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-amber-500 text-white text-xs flex items-center justify-center font-bold">1</span>
+                    PDF de Origen y Hojas
+                  </h2>
+                  {totalPages > 0 && (
+                    <span className="text-xs bg-emerald-50 text-emerald-700 font-semibold px-2 py-0.5 rounded border border-emerald-200">
+                      {totalPages} páginas cargadas
+                    </span>
+                  )}
+                </div>
+
+                {/* File picker */}
+                <div className="flex items-center gap-3">
+                  <label className="flex-1 border-2 border-dashed border-slate-300 hover:border-indigo-500 hover:bg-indigo-50/20 rounded-xl p-4 text-center cursor-pointer transition-colors block">
+                    <input type="file" accept="application/pdf" onChange={handleFileUpload} className="hidden" />
+                    <span className="text-xs font-semibold text-indigo-600 block">
+                      {sourceFile ? `Archivo: ${sourceFile.name}` : 'Haz clic o arrastra aquí tu archivo PDF'}
+                    </span>
+                    <span className="text-[10px] text-slate-400 mt-0.5 block">
+                      Extraerá automáticamente todas las páginas para imponer
+                    </span>
+                  </label>
+                </div>
+
+                {/* Demo sample buttons */}
+                <div className="flex flex-wrap items-center gap-2 pt-1 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                  <span className="text-[11px] font-semibold text-slate-600">¿Sin PDF a mano?:</span>
+                  <button
+                    type="button"
+                    onClick={() => handleLoadDemo(16)}
+                    className="px-2.5 py-1 rounded-md text-xs font-semibold bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 transition-colors cursor-pointer"
+                    title="Cargar 16 páginas de prueba numeradas y con colores para probar el Bookzine"
+                  >
+                    ✨ Probar Demo 16 Páginas
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleLoadDemo(8)}
+                    className="px-2.5 py-1 rounded-md text-xs font-semibold bg-purple-100 hover:bg-purple-200 text-purple-900 border border-purple-300 transition-colors cursor-pointer"
+                    title="Cargar 8 páginas de prueba para probar el Mini-Zine"
+                  >
+                    ✨ Probar Demo 8 Páginas
+                  </button>
+                  {totalPages > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => { setExtractedPages([]); setSourceFile(null); }}
+                      className="ml-auto px-2 py-1 rounded-md text-xs text-rose-600 hover:bg-rose-50 font-medium cursor-pointer"
+                    >
+                      Limpiar
+                    </button>
+                  )}
+                </div>
+
+                {isExtracting && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 flex items-center justify-between">
+                    <span>Procesando páginas...</span>
+                    <span className="font-bold">{extractProgress.current} / {extractProgress.total}</span>
+                  </div>
+                )}
+
+                {/* Sequence strip with drag & drop & move */}
+                {totalPages > 0 && (
+                  <div className="space-y-2 pt-2 border-t border-slate-100">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-slate-700">
+                        Secuencia de páginas (Arrastra o usa ◀ ▶ para mover de sitio):
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => insertBlankPage(Math.floor(totalPages / 2), 1)}
+                          className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold rounded text-[11px] border border-indigo-200"
+                          title="Insertar página en blanco en medio"
+                        >
+                          + Blanco en medio
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => insertBlankPage(totalPages, 1)}
+                          className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded text-[11px] border border-slate-200"
+                          title="Insertar página en blanco al final"
+                        >
+                          + Al final
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-2 pt-1">
+                      {extractedPages.map((page, idx) => (
+                        <div
+                          key={page.id}
+                          draggable
+                          onDragStart={() => setDraggedIdx(idx)}
+                          onDragOver={(e) => { e.preventDefault(); setDragOverIdx(idx); }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            if (draggedIdx !== null && draggedIdx !== idx) {
+                              movePage(draggedIdx, idx);
+                            }
+                            setDraggedIdx(null);
+                            setDragOverIdx(null);
+                          }}
+                          onDragEnd={() => { setDraggedIdx(null); setDragOverIdx(null); }}
+                          className={`shrink-0 w-20 rounded-lg border p-1 text-center text-[10px] relative transition-all cursor-grab active:cursor-grabbing ${
+                            draggedIdx === idx
+                              ? 'opacity-30'
+                              : dragOverIdx === idx
+                              ? 'border-indigo-600 bg-indigo-50 ring-2 ring-indigo-400'
+                              : page.isBlank
+                              ? 'border-indigo-300 bg-indigo-50/50'
+                              : 'border-slate-200 bg-white'
+                          }`}
+                        >
+                          {page.isBlank && (
+                            <button
+                              type="button"
+                              onClick={() => removePage(idx)}
+                              className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white font-bold flex items-center justify-center text-[9px]"
+                              title="Eliminar página en blanco"
+                            >
+                              ×
+                            </button>
+                          )}
+
+                          <div className="aspect-[3/4] bg-slate-100 rounded overflow-hidden mb-1 flex items-center justify-center">
+                            {page.isBlank ? (
+                              <span className="text-[8px] font-bold text-indigo-600">Blanco</span>
+                            ) : (
+                              <img src={page.dataUrl} alt={`P.${page.pageNumber}`} className="w-full h-full object-contain pointer-events-none" />
+                            )}
+                          </div>
+
+                          <div className="font-bold text-slate-800">Pág {page.pageNumber}</div>
+
+                          <div className="flex items-center justify-between mt-1 pt-1 border-t border-slate-100">
+                            <button
+                              type="button"
+                              disabled={idx === 0}
+                              onClick={() => movePage(idx, idx - 1)}
+                              className="w-4 h-4 rounded hover:bg-slate-200 disabled:opacity-20 text-slate-700 flex items-center justify-center"
+                              title="Mover una posición a la izquierda"
+                            >
+                              ◀
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMovingPageTarget({ idx, num: page.pageNumber });
+                                setTargetPosInput(page.pageNumber);
+                              }}
+                              className="text-[8px] font-bold text-indigo-600 hover:underline px-0.5"
+                              title="Mover a otra posición"
+                            >
+                              ↔
+                            </button>
+                            <button
+                              type="button"
+                              disabled={idx === totalPages - 1}
+                              onClick={() => movePage(idx, idx + 1)}
+                              className="w-4 h-4 rounded hover:bg-slate-200 disabled:opacity-20 text-slate-700 flex items-center justify-center"
+                              title="Mover una posición a la derecha"
+                            >
+                              ▶
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Step 2: Sheet Configuration */}
+              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                  <h2 className="text-sm font-bold text-slate-800 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-amber-500 text-white text-xs flex items-center justify-center font-bold">2</span>
+                    Configuración del Pliego y Borde Punteado
+                  </h2>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Orientación del Pliego:</label>
+                    <select
+                      value={sheetConfig.orientation}
+                      onChange={(e) => setSheetConfig({ ...sheetConfig, orientation: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2 font-medium"
+                    >
+                      <option value="landscape">Horizontal (Apaisado)</option>
+                      <option value="portrait">Vertical (Retrato)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Tamaño de Papel:</label>
+                    <select
+                      value={sheetConfig.sheetSize}
+                      onChange={(e) => setSheetConfig({ ...sheetConfig, sheetSize: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2 font-medium"
+                    >
+                      <option value="A3">A3 Estándar (Recomendado)</option>
+                      <option value="A4">A4</option>
+                      <option value="Tabloid">Tabloide / Doble Carta</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Borde punteado perimetral */}
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2 text-xs">
+                  <label className="flex items-center gap-2 font-bold text-slate-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={sheetConfig.showSheetBorder}
+                      onChange={(e) => setSheetConfig({ ...sheetConfig, showSheetBorder: e.target.checked })}
+                      className="w-4 h-4 rounded text-amber-600"
+                    />
+                    <span>✂️ Borde punteado alrededor de la hoja (Guía de corte)</span>
+                  </label>
+
+                  {sheetConfig.showSheetBorder && (
+                    <div className="grid grid-cols-2 gap-2 pt-1">
+                      <div>
+                        <span className="text-[11px] text-slate-500 block mb-0.5">Estilo de línea:</span>
+                        <select
+                          value={sheetConfig.sheetBorderStyle}
+                          onChange={(e) => setSheetConfig({ ...sheetConfig, sheetBorderStyle: e.target.value })}
+                          className="w-full bg-white border border-slate-300 rounded p-1 text-xs font-semibold"
+                        >
+                          <option value="dotted">Punteado (...)</option>
+                          <option value="dashed">Discontinuo (---)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <span className="text-[11px] text-slate-500 block mb-0.5">Ubicación:</span>
+                        <select
+                          value={sheetConfig.sheetBorderPosition}
+                          onChange={(e) => setSheetConfig({ ...sheetConfig, sheetBorderPosition: e.target.value })}
+                          className="w-full bg-white border border-slate-300 rounded p-1 text-xs font-semibold"
+                        >
+                          <option value="margin">En el margen de corte</option>
+                          <option value="edge">Alrededor del papel</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Margins */}
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <div className="flex justify-between text-slate-600 mb-1">
+                      <span>Margen exterior:</span>
+                      <span className="font-bold">{sheetConfig.marginPercent}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="6"
+                      step="0.5"
+                      value={sheetConfig.marginPercent}
+                      onChange={(e) => setSheetConfig({ ...sheetConfig, marginPercent: parseFloat(e.target.value) })}
+                      className="w-full accent-amber-500"
+                    />
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-slate-600 mb-1">
+                      <span>Espacio casillas:</span>
+                      <span className="font-bold">{sheetConfig.gapPercent}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="3"
+                      step="0.2"
+                      value={sheetConfig.gapPercent}
+                      onChange={(e) => setSheetConfig({ ...sheetConfig, gapPercent: parseFloat(e.target.value) })}
+                      className="w-full accent-amber-500"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Step 3: Interactive Live Sheet Viewer */}
+            <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-amber-500 text-white font-bold text-xs flex items-center justify-center">3</span>
+                  <h2 className="text-sm font-semibold text-slate-800">
+                    Visor de Pliego Imposicionado ({impositionMode === 'zine8' ? '4x2 - 8 Páginas' : '4x4 - 16 Páginas'})
+                  </h2>
+                </div>
+
+                {/* Pliego navigation & blank page & move sheet */}
+                <div className="flex items-center gap-2 text-xs flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setBlankModalTarget({
+                        targetPageNumber: Math.max(1, baseOffset + 1),
+                        placement: 'before',
+                        count: 1,
+                      })
+                    }
+                    className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-xs flex items-center gap-1 shadow-xs cursor-pointer"
+                    title="Añadir página en blanco en la vista previa de este pliego"
+                  >
+                    <span>+ Añadir Página en Blanco</span>
+                  </button>
+
+                  {Array.from({ length: totalSheets }).map((_, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setActiveSheetIndex(idx)}
+                      className={`px-3 py-1 rounded-lg font-bold transition-colors ${
+                        activeSheetIndex === idx
+                          ? 'bg-amber-500 text-white shadow-2xs'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                    >
+                      Pliego {idx + 1}
+                    </button>
+                  ))}
+
+                  {totalSheets > 1 && (
+                    <div className="flex items-center gap-1 pl-2 border-l border-slate-200">
+                      <button
+                        type="button"
+                        disabled={activeSheetIndex === 0}
+                        onClick={() => moveSheet(activeSheetIndex, activeSheetIndex - 1)}
+                        className="px-2 py-0.5 bg-white border border-slate-300 rounded font-bold disabled:opacity-30"
+                        title="Mover este pliego una posición a la izquierda"
+                      >
+                        ◀ Mover pliego
+                      </button>
+                      <button
+                        type="button"
+                        disabled={activeSheetIndex >= totalSheets - 1}
+                        onClick={() => moveSheet(activeSheetIndex, activeSheetIndex + 1)}
+                        className="px-2 py-0.5 bg-white border border-slate-300 rounded font-bold disabled:opacity-30"
+                        title="Mover este pliego una posición a la derecha"
+                      >
+                        Mover pliego ▶
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Sheet Canvas Area */}
+              <div className="p-6 bg-slate-100/70 overflow-auto flex justify-center items-center min-h-[460px]">
+                <div
+                  style={{
+                    padding: `${sheetConfig.marginPercent}%`,
+                  }}
+                  className={`w-full ${
+                    sheetConfig.orientation === 'landscape' ? 'max-w-4xl aspect-[1.414/1]' : 'max-w-xl aspect-[1/1.414]'
+                  } bg-white rounded-xl shadow-lg border border-slate-300 relative overflow-hidden flex flex-col`}
+                >
+                  {/* Dotted border around sheet */}
+                  {sheetConfig.showSheetBorder && (
+                    <div
+                      style={{
+                        inset: sheetConfig.sheetBorderPosition === 'edge' ? '8px' : `${sheetConfig.marginPercent}%`,
+                      }}
+                      className={`absolute pointer-events-none z-20 border-2 ${
+                        sheetConfig.sheetBorderStyle === 'dashed' ? 'border-dashed' : 'border-dotted'
+                      } border-slate-400/90 rounded-xs`}
+                    >
+                      <div className="absolute top-1 left-1.5 flex items-center gap-1 bg-slate-900/80 text-white text-[8px] font-bold px-1.5 py-0.5 rounded shadow-sm">
+                        <span>✂️ Borde punteado de hoja</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Slit line for 8-page zine */}
+                  {rowsCount === 2 && colsCount === 4 && sheetConfig.showFoldGuides && (
+                    <div className="absolute left-[25%] right-[25%] top-1/2 -translate-y-1/2 border-t-2 border-dashed border-rose-500 z-30 pointer-events-none flex items-center justify-center">
+                      <span className="bg-rose-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm -mt-2.5">
+                        ✂️ Corte central (Slit)
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Grid */}
+                  <div
+                    style={{
+                      gap: `${sheetConfig.gapPercent}%`,
+                      gridTemplateColumns: `repeat(${colsCount}, minmax(0, 1fr))`,
+                      gridTemplateRows: `repeat(${rowsCount}, minmax(0, 1fr))`,
+                    }}
+                    className="grid w-full h-full relative z-10"
+                  >
+                    {gridSlots.map((slot) => {
+                      const targetPageNum = baseOffset + slot.relativePage;
+                      const hasPage = targetPageNum <= totalPages;
+                      const pageData = hasPage ? extractedPages[targetPageNum - 1] : null;
+
+                      const override = slotOverrides[`${activeSheetIndex}_${slot.slotIndex}`];
+                      const effectiveRot = override !== undefined ? override : slot.rotation;
+
+                      return (
+                        <div
+                          key={slot.slotIndex}
+                          className="relative rounded border border-slate-200 bg-white/95 flex flex-col justify-between overflow-hidden group"
+                        >
+                          {/* Slot header */}
+                          <div className="absolute top-1 left-1 z-20 flex items-center gap-1">
+                            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-slate-800/85 text-white shadow-xs">
+                              Pág {targetPageNum}
+                            </span>
+                            <span className="text-[8px] font-mono font-bold px-1 py-0.2 rounded bg-slate-200 text-slate-800">
+                              {effectiveRot}°
+                            </span>
+                          </div>
+
+                          {/* Quick blank, move & rotate buttons */}
+                          <div className="absolute top-1 right-1 z-20 flex items-center gap-0.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setBlankModalTarget({
+                                  targetPageNumber: Math.min(targetPageNum, totalPages + 1),
+                                  placement: 'before',
+                                  count: 1,
+                                })
+                              }
+                              className="w-5 h-5 rounded bg-emerald-50 hover:bg-emerald-600 hover:text-white text-emerald-700 shadow-xs border border-emerald-200 flex items-center justify-center text-[11px] font-bold cursor-pointer"
+                              title={`Añadir página en blanco en esta posición (Pág ${targetPageNum})`}
+                            >
+                              +
+                            </button>
+                            {hasPage && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setMovingPageTarget({ idx: targetPageNum - 1, num: targetPageNum });
+                                    setTargetPosInput(targetPageNum);
+                                  }}
+                                  className="w-5 h-5 rounded bg-indigo-50 hover:bg-indigo-600 hover:text-white text-indigo-700 shadow-xs border border-indigo-200 flex items-center justify-center text-[10px] font-bold cursor-pointer"
+                                  title="Mover esta página de sitio"
+                                >
+                                  ↔
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const next = (effectiveRot + 90) % 360;
+                                    setSlotOverrides({ ...slotOverrides, [`${activeSheetIndex}_${slot.slotIndex}`]: next });
+                                  }}
+                                  className="w-5 h-5 rounded bg-white hover:bg-amber-100 text-slate-700 shadow-xs border border-slate-200 flex items-center justify-center text-[10px] cursor-pointer"
+                                  title="Girar página +90°"
+                                >
+                                  ↻
+                                </button>
+                              </>
+                            )}
+                          </div>
+
+                          {/* Content */}
+                          <div className="w-full h-full flex items-center justify-center p-1.5 overflow-hidden">
+                            {pageData ? (
+                              pageData.isBlank ? (
+                                <div
+                                  style={{ transform: `rotate(${effectiveRot}deg)` }}
+                                  className="w-full h-full flex flex-col items-center justify-center border border-dashed border-indigo-300 rounded bg-indigo-50/20"
+                                >
+                                  <span className="text-[10px] font-bold text-indigo-700">Página en Blanco</span>
+                                  <span className="text-[8px] text-slate-400">Pág {targetPageNum}</span>
+                                </div>
+                              ) : (
+                                <div
+                                  style={{ transform: `rotate(${effectiveRot}deg)` }}
+                                  className="w-full h-full flex items-center justify-center"
+                                >
+                                  <img
+                                    src={pageData.dataUrl}
+                                    alt={`P.${targetPageNum}`}
+                                    className="w-full h-full object-contain pointer-events-none"
+                                  />
+                                </div>
+                              )
+                            ) : (
+                              <div className="flex flex-col items-center justify-center">
+                                <span className="text-[10px] text-slate-400 font-medium">Pág. {targetPageNum}</span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setBlankModalTarget({
+                                      targetPageNumber: Math.min(targetPageNum, totalPages + 1),
+                                      placement: 'before',
+                                      count: 1,
+                                    })
+                                  }
+                                  className="mt-1 px-1.5 py-0.5 rounded text-[9px] bg-indigo-50 hover:bg-indigo-600 hover:text-white text-indigo-700 font-bold border border-indigo-200 cursor-pointer transition-colors"
+                                  title="Asignar página en blanco a esta casilla"
+                                >
+                                  + Blanco
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Step 4: Export Panel */}
+            <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-indigo-950 text-white rounded-xl p-5 shadow-lg flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h3 className="text-base font-bold flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-amber-400 text-slate-950 text-xs flex items-center justify-center font-bold">4</span>
+                  Exportar Fanzine Imposicionado a PDF
+                </h3>
+                <p className="text-xs text-slate-300 mt-1">
+                  Generará {totalSheets} pliego(s) de {sheetConfig.sheetSize} con la orientación, borde punteado perimetral y plegado configurados.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                disabled={isExporting || totalPages === 0}
+                onClick={exportPdf}
+                className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold rounded-xl text-sm transition-all shadow-md cursor-pointer flex items-center gap-2"
+              >
+                {isExporting ? 'Generando PDF...' : '📥 Descargar PDF Imposicionado'}
+              </button>
+            </div>
+          </main>
+
+          {/* Move Page Modal */}
+          {movingPageTarget && (
+            <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-sm w-full p-5 space-y-4 animate-fade-in">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-800">Mover Página de Sitio</h3>
+                    <p className="text-[11px] text-slate-500">
+                      Página seleccionada: <strong className="text-indigo-600">Pág. {movingPageTarget.num}</strong>
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setMovingPageTarget(null)}
+                    className="w-7 h-7 rounded-lg hover:bg-slate-100 text-slate-400 font-bold"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                <div className="space-y-2 text-xs">
+                  <span className="font-semibold text-slate-700 block">Mover a la posición:</span>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={targetPosInput}
+                      onChange={(e) => setTargetPosInput(Number(e.target.value))}
+                      className="flex-1 bg-slate-50 border border-slate-300 rounded-lg p-2 font-bold text-slate-800"
+                    >
+                      {Array.from({ length: totalPages }, (_, i) => i + 1).map((n) => (
+                        <option key={n} value={n}>
+                          Página {n} {n === 1 ? '(Portada)' : n === totalPages ? '(Atrás)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        movePage(movingPageTarget.idx, targetPosInput - 1);
+                        setMovingPageTarget(null);
+                      }}
+                      className="py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg"
+                    >
+                      Mover a Pág. {targetPosInput}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        swapPages(movingPageTarget.idx, targetPosInput - 1);
+                        setMovingPageTarget(null);
+                      }}
+                      className="py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg border border-slate-300"
+                    >
+                      Intercambiar
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal Añadir Página en Blanco en la Vista Previa del Pliego */}
+          {blankModalTarget && (
+            <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-5 space-y-4">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-lg bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center text-sm">
+                      +📄
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-800">
+                        Añadir Página en Blanco al Pliego
+                      </h3>
+                      <p className="text-[11px] text-slate-500">
+                        Pliego {activeSheetIndex + 1} • Total fanzine: {totalPages} páginas
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setBlankModalTarget(null)}
+                    className="w-7 h-7 rounded-lg hover:bg-slate-100 text-slate-400 font-bold"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className="font-semibold text-slate-700 block mb-1">
+                      ¿Dónde insertarla?
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label
+                        className={`flex items-start gap-2 p-2 rounded-lg border cursor-pointer ${
+                          blankModalTarget.placement === 'before'
+                            ? 'border-indigo-600 bg-indigo-50/50 font-semibold text-indigo-900'
+                            : 'border-slate-200 text-slate-700'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="htmlBlankPos"
+                          checked={blankModalTarget.placement === 'before'}
+                          onChange={() =>
+                            setBlankModalTarget({ ...blankModalTarget, placement: 'before' })
+                          }
+                          className="mt-0.5 text-indigo-600"
+                        />
+                        <span>Antes de la página seleccionada</span>
+                      </label>
+                      <label
+                        className={`flex items-start gap-2 p-2 rounded-lg border cursor-pointer ${
+                          blankModalTarget.placement === 'after'
+                            ? 'border-indigo-600 bg-indigo-50/50 font-semibold text-indigo-900'
+                            : 'border-slate-200 text-slate-700'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="htmlBlankPos"
+                          checked={blankModalTarget.placement === 'after'}
+                          onChange={() =>
+                            setBlankModalTarget({ ...blankModalTarget, placement: 'after' })
+                          }
+                          className="mt-0.5 text-indigo-600"
+                        />
+                        <span>Después de la página seleccionada</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-slate-700">Página de referencia:</span>
+                    <select
+                      value={blankModalTarget.targetPageNumber}
+                      onChange={(e) =>
+                        setBlankModalTarget({
+                          ...blankModalTarget,
+                          targetPageNumber: Number(e.target.value),
+                        })
+                      }
+                      className="flex-1 bg-slate-50 border border-slate-300 rounded-lg p-1.5 font-bold text-slate-800"
+                    >
+                      {totalPages === 0 ? (
+                        <option value={1}>Página 1 (Inicial)</option>
+                      ) : (
+                        Array.from({ length: totalPages }, (_, i) => i + 1).map((n) => (
+                          <option key={n} value={n}>
+                            Página {n} {n === 1 ? '(Portada)' : n === totalPages ? '(Atrás)' : ''}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                    <span className="font-semibold text-slate-700">Cantidad de páginas:</span>
+                    <div className="flex items-center gap-1">
+                      {[1, 2, 4].map((q) => (
+                        <button
+                          key={q}
+                          type="button"
+                          onClick={() => setBlankModalTarget({ ...blankModalTarget, count: q })}
+                          className={`px-2 py-1 rounded font-bold border ${
+                            blankModalTarget.count === q
+                              ? 'bg-indigo-600 text-white border-indigo-600'
+                              : 'bg-slate-50 text-slate-700 border-slate-200'
+                          }`}
+                        >
+                          +{q}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="p-2 bg-indigo-50 rounded-lg text-[11px] text-indigo-900">
+                    Se insertará(n) <strong>{blankModalTarget.count} página(s) en blanco</strong>{' '}
+                    {blankModalTarget.placement === 'before' ? 'antes' : 'después'} de la{' '}
+                    <strong>Pág. {blankModalTarget.targetPageNumber}</strong>. El pliego se actualizará automáticamente.
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const raw =
+                          blankModalTarget.placement === 'before'
+                            ? blankModalTarget.targetPageNumber - 1
+                            : blankModalTarget.targetPageNumber;
+                        const idx = Math.max(0, Math.min(raw, totalPages));
+                        insertBlankPage(idx, blankModalTarget.count || 1);
+                        setBlankModalTarget(null);
+                      }}
+                      className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg"
+                    >
+                      Insertar {blankModalTarget.count || 1} Página(s) en Blanco
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBlankModalTarget(null)}
+                      className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded-lg"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal Guía de Plegado con Animaciones Paso a Paso */}
+          {isFoldingGuideOpen && (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 animate-fade-in">
+              <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+                {/* Header */}
+                <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between shrink-0 bg-white">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center font-bold">
+                      📖
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-sm font-bold text-slate-900">Guía de Plegado y Corte Interactiva</h3>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                          Animación Paso a Paso
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        Cómo transformar tu pliego impreso en el fanzine doblado
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsFoldingGuideOpen(false)}
+                    className="w-7 h-7 rounded-lg hover:bg-slate-100 text-slate-400 font-bold flex items-center justify-center"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                {/* Subheader: Bookzine selector */}
+                <div className="px-5 py-2.5 border-b border-slate-100 bg-slate-50 flex items-center justify-between gap-2 shrink-0">
+                  <div className="flex items-center gap-1.5 p-1 bg-slate-200 rounded-xl">
+                    <button
+                      type="button"
+                      onClick={() => { setGuideActiveTab('bookzine16'); setGuideStep(0); }}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        guideActiveTab === 'bookzine16'
+                          ? 'bg-white text-slate-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Bookzine 16 Páginas (Snake Fold)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setGuideActiveTab('zine8'); setGuideStep(0); }}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                        guideActiveTab === 'zine8'
+                          ? 'bg-white text-purple-900 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Mini-Zine 8 Páginas (Canva con Corte)
+                    </button>
+                  </div>
+                  <span className="text-xs font-bold text-slate-600">
+                    Paso {guideStep + 1} de 5
+                  </span>
+                </div>
+
+                {/* Body */}
+                <div className="p-5 overflow-y-auto space-y-4 flex-1">
+                  {/* Step Pills */}
+                  <div className="grid grid-cols-5 gap-1.5 text-center">
+                    {[0, 1, 2, 3, 4].map((idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => { setGuideStep(idx); setGuidePlaying(false); }}
+                        className={`p-1.5 rounded-xl border text-xs font-bold transition-all ${
+                          guideStep === idx
+                            ? guideActiveTab === 'zine8'
+                              ? 'bg-purple-600 text-white border-purple-600 shadow-xs'
+                              : 'bg-amber-500 text-slate-950 border-amber-500 shadow-xs'
+                            : idx < guideStep
+                            ? 'bg-slate-100 text-slate-700 border-slate-200'
+                            : 'bg-white text-slate-400 border-slate-200'
+                        }`}
+                      >
+                        Paso {idx + 1}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Animation Stage */}
+                  <div className="bg-slate-950 rounded-xl p-4 min-h-[220px] flex items-center justify-center text-white relative overflow-hidden border border-slate-800 shadow-inner">
+                    {guideActiveTab === 'zine8' ? (
+                      /* Mini-Zine 8 Páginas Visuals */
+                      guideStep === 0 ? (
+                        <div className="w-full max-w-sm bg-white rounded-lg p-2 text-slate-900 shadow-lg text-center">
+                          <span className="text-[10px] font-bold text-purple-700 block mb-1">Paso 1: Hoja extendida 4x2</span>
+                          <div className="grid grid-cols-4 gap-1 text-[10px] font-bold">
+                            <div className="p-1.5 bg-indigo-100 border rounded rotate-180">Pág 1 (Portada)</div>
+                            <div className="p-1.5 bg-violet-100 border rounded rotate-180">Pág 8 (Atrás)</div>
+                            <div className="p-1.5 bg-amber-50 border rounded rotate-180">Pág 7</div>
+                            <div className="p-1.5 bg-amber-50 border rounded rotate-180">Pág 6</div>
+                            <div className="col-span-4 border-t-2 border-dashed border-indigo-400 my-0.5" />
+                            <div className="p-1.5 bg-slate-100 border rounded">Pág 2</div>
+                            <div className="p-1.5 bg-slate-100 border rounded">Pág 3</div>
+                            <div className="p-1.5 bg-slate-100 border rounded">Pág 4</div>
+                            <div className="p-1.5 bg-slate-100 border rounded">Pág 5</div>
+                          </div>
+                        </div>
+                      ) : guideStep === 1 ? (
+                        <div className="w-full max-w-xs bg-white rounded-lg p-3 text-slate-900 shadow-lg text-center">
+                          <span className="text-[10px] font-bold text-purple-700 block mb-2">Paso 2: Doblar por la mitad a lo ancho</span>
+                          <div className="grid grid-cols-4 gap-1 text-[10px] font-bold">
+                            <div className="p-2 bg-indigo-100 border rounded">1 / 2</div>
+                            <div className="p-2 bg-purple-100 border-2 border-dashed border-rose-400 rounded">8 / 3</div>
+                            <div className="p-2 bg-purple-100 border-2 border-dashed border-rose-400 rounded">7 / 4</div>
+                            <div className="p-2 bg-amber-50 border rounded">6 / 5</div>
+                          </div>
+                          <span className="text-[10px] text-slate-500 mt-2 block">El pliegue central cerrado queda arriba</span>
+                        </div>
+                      ) : guideStep === 2 ? (
+                        <div className="w-full max-w-sm bg-white rounded-lg p-3 text-slate-900 shadow-lg text-center">
+                          <span className="text-[10px] font-bold text-rose-700 block mb-1">Paso 3: Corte central de ranura (Slit Cut)</span>
+                          <div className="grid grid-cols-4 gap-1 text-[10px] font-bold">
+                            <div className="p-2 bg-slate-100 text-slate-400 rounded">Col 1</div>
+                            <div className="col-span-2 p-2 bg-rose-50 border-2 border-dashed border-rose-500 rounded text-rose-800">
+                              ✂️ Cortar pliegue central aquí
+                            </div>
+                            <div className="p-2 bg-slate-100 text-slate-400 rounded">Col 4</div>
+                          </div>
+                          <span className="text-[10px] text-amber-600 font-bold mt-2 block">No cortar los paneles exteriores</span>
+                        </div>
+                      ) : guideStep === 3 ? (
+                        <div className="text-center space-y-2">
+                          <div className="text-4xl animate-pulse">✣</div>
+                          <span className="text-xs font-bold text-amber-300 block">Paso 4: Abrir y empujar hacia el centro</span>
+                          <p className="text-[11px] text-slate-300 max-w-xs">
+                            Al juntar los extremos izquierdo y derecho, la ranura cortada se abre en forma de cruz (+) formando 4 alas.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="w-40 bg-white rounded-r-xl rounded-l-xs p-3 text-slate-900 shadow-2xl border-l-4 border-l-purple-600 text-left">
+                          <span className="text-[9px] font-bold text-purple-600 uppercase block">Listo</span>
+                          <h4 className="text-sm font-extrabold mt-0.5">Pág 1: Portada</h4>
+                          <p className="text-[9px] text-slate-500 mt-1">Librito de 8 páginas correlativas sin grapas.</p>
+                          <span className="text-[10px] text-emerald-600 font-bold mt-2 block">✓ Plegado completado</span>
+                        </div>
+                      )
+                    ) : (
+                      /* Bookzine 16 Páginas Snake Visuals */
+                      guideStep === 0 ? (
+                        <div className="w-full max-w-sm bg-white rounded-lg p-2 text-slate-900 shadow-lg text-center">
+                          <span className="text-[10px] font-bold text-amber-700 block mb-1">Paso 1: Hoja plana 4x4 (16 paneles)</span>
+                          <div className="grid grid-cols-4 gap-0.5 text-[9px] font-bold">
+                            <div className="p-1 bg-amber-50 rounded">3</div>
+                            <div className="p-1 bg-amber-50 rounded">2</div>
+                            <div className="p-1 bg-indigo-100 font-extrabold text-indigo-900 rounded">1 (Port.)</div>
+                            <div className="p-1 bg-violet-100 font-extrabold text-violet-900 rounded">16 (Atr.)</div>
+                            <div className="p-1 bg-slate-100 rounded">4</div>
+                            <div className="p-1 bg-slate-100 rounded">5</div>
+                            <div className="p-1 bg-slate-100 rounded">6</div>
+                            <div className="p-1 bg-slate-100 rounded">7</div>
+                            <div className="p-1 bg-slate-100 rounded">11</div>
+                            <div className="p-1 bg-slate-100 rounded">10</div>
+                            <div className="p-1 bg-slate-100 rounded">9</div>
+                            <div className="p-1 bg-slate-100 rounded">8</div>
+                            <div className="p-1 bg-slate-100 rounded">12</div>
+                            <div className="p-1 bg-slate-100 rounded">13</div>
+                            <div className="p-1 bg-slate-100 rounded">14</div>
+                            <div className="p-1 bg-slate-100 rounded">15</div>
+                          </div>
+                        </div>
+                      ) : guideStep === 1 ? (
+                        <div className="w-full max-w-sm bg-white rounded-lg p-2.5 text-slate-900 shadow-lg text-center space-y-1">
+                          <span className="text-[10px] font-bold text-rose-700 block">Paso 2: 3 Cortes alternos en serpiente</span>
+                          <div className="text-[9px] font-bold space-y-1">
+                            <div className="p-1 bg-slate-50 border-b border-dashed border-rose-500 flex justify-between">
+                              <span>✂️ Corte 1 (Izquierda a Derecha)</span>
+                              <span className="bg-slate-200 px-1 rounded">Unión derecha</span>
+                            </div>
+                            <div className="p-1 bg-slate-50 border-b border-dashed border-rose-500 flex justify-between">
+                              <span className="bg-slate-200 px-1 rounded">Unión izquierda</span>
+                              <span>Corte 2 (Derecha a Izquierda) ✂️</span>
+                            </div>
+                            <div className="p-1 bg-slate-50 border-b border-dashed border-rose-500 flex justify-between">
+                              <span>✂️ Corte 3 (Izquierda a Derecha)</span>
+                              <span className="bg-slate-200 px-1 rounded">Unión derecha</span>
+                            </div>
+                          </div>
+                        </div>
+                      ) : guideStep === 2 ? (
+                        <div className="w-full max-w-sm bg-white rounded-lg p-3 text-slate-900 shadow-lg text-center">
+                          <span className="text-[10px] font-bold text-indigo-700 block mb-2">Paso 3: Tira continua desplegada</span>
+                          <div className="p-2 bg-indigo-50 border border-indigo-200 rounded text-[10px] font-bold text-indigo-900">
+                            1 (Portada) → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 (Atrás)
+                          </div>
+                          <span className="text-[9px] text-slate-500 mt-2 block">Los cortes forman una única tira en zigzag continuo</span>
+                        </div>
+                      ) : guideStep === 3 ? (
+                        <div className="text-center space-y-2">
+                          <div className="text-3xl text-amber-400 font-mono tracking-widest">▲ ▼ ▲ ▼ ▲ ▼ ▲</div>
+                          <span className="text-xs font-bold text-amber-300 block">Paso 4: Plegado en acordeón (Zigzag)</span>
+                          <p className="text-[11px] text-slate-300 max-w-xs">
+                            Dobla alternando cada página en valle y montaña hasta comprimir toda la tira en un solo bloque.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="w-44 bg-white rounded-r-xl rounded-l-xs p-3 text-slate-900 shadow-2xl border-l-4 border-l-amber-600 text-left">
+                          <span className="text-[9px] font-bold text-amber-600 uppercase block">Finalizado</span>
+                          <h4 className="text-sm font-extrabold mt-0.5">Pág 1: Portada</h4>
+                          <p className="text-[9px] text-slate-500 mt-1">16 páginas correlativas. Pág 16 de contraportada.</p>
+                          <span className="text-[10px] text-emerald-600 font-bold mt-2 block">✓ Bookzine completado</span>
+                        </div>
+                      )
+                    )}
+                  </div>
+
+                  {/* Step Description Card */}
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-700 space-y-1">
+                    <h4 className="font-bold text-slate-900">
+                      {guideActiveTab === 'zine8'
+                        ? [
+                            '1. Imprimir y marcar pliegues (8 cuadrantes)',
+                            '2. Doblar por la mitad a lo ancho',
+                            '3. Corte central en ranura (Slit Cut con tijeras)',
+                            '4. Abrir en forma de cruz (+) y colapsar',
+                            '5. Doblar las 8 páginas en librito encuadernado',
+                          ][guideStep]
+                        : [
+                            '1. Imprimir la hoja 4x4 (16 cuadrantes)',
+                            '2. Realizar los 3 cortes de serpiente en zigzag',
+                            '3. Desplegar en tira continua (1 al 16 correlativo)',
+                            '4. Plegado en acordeón (pliegues alternos valle y montaña)',
+                            '5. Bookzine de 16 páginas completado y listo para leer',
+                          ][guideStep]}
+                    </h4>
+                    <p className="text-slate-600 text-[11px]">
+                      {guideActiveTab === 'zine8'
+                        ? [
+                            'Imprime en A4 o A3 apaisado. Marca los 8 paneles plegando por la mitad en horizontal y vertical.',
+                            'Dobla la hoja por la mitad a lo ancho de modo que los paneles queden superpuestos.',
+                            'Corta únicamente la línea horizontal de las 2 columnas centrales. No cortes los bordes exteriores.',
+                            'Abre la hoja a lo largo y empuja los dos extremos hacia el centro para que la ranura se abra en cruz.',
+                            'Aplana las 4 alas hacia un lado. La página 1 quedará en la portada y la 8 en la contraportada.',
+                          ][guideStep]}
+                        : [
+                            'Imprime el PDF en A3 o A4 horizontal. Observa que la portada (1) y contraportada (16) están en la fila superior.',
+                            'Corta las 3 líneas divisorias de forma alterna sin llegar al final para no separar la tira.',
+                            'Estira la tira continua comprobando que el orden numérico fluye continuo del 1 al 16.',
+                            'Dobla cada página alternando hacia adelante y hacia atrás como un acordeón leporélo.',
+                            'El librito queda encuadernado y compacto sin grapas ni adhesivos.',
+                          ][guideStep]}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Footer Controls */}
+                <div className="px-5 py-3 border-t border-slate-100 bg-slate-50 flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setGuidePlaying(!guidePlaying)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold text-white transition-all shadow-xs ${
+                        guidePlaying ? 'bg-rose-600 hover:bg-rose-500' : 'bg-indigo-600 hover:bg-indigo-500'
+                      }`}
+                    >
+                      {guidePlaying ? '⏸ Pausar' : '▶ Reproducir animación'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setGuideStep(0); setGuidePlaying(false); }}
+                      className="px-2.5 py-1.5 rounded-lg text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold"
+                    >
+                      ↺ Inicio
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={guideStep === 0}
+                      onClick={() => { setGuideStep((prev) => Math.max(0, prev - 1)); setGuidePlaying(false); }}
+                      className="px-3 py-1.5 rounded-lg text-xs bg-slate-200 hover:bg-slate-300 disabled:opacity-30 text-slate-800 font-bold"
+                    >
+                      ← Anterior
+                    </button>
+                    <button
+                      type="button"
+                      disabled={guideStep === 4}
+                      onClick={() => { setGuideStep((prev) => Math.min(4, prev + 1)); setGuidePlaying(false); }}
+                      className="px-3 py-1.5 rounded-lg text-xs bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-slate-950 font-bold"
+                    >
+                      Siguiente →
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Footer */}
+          <footer className="bg-white border-t border-slate-200 py-3 px-4 text-center text-xs text-slate-400">
+            Bookzine & Mini-Zine Creator • Aplicación web autónoma en un único archivo HTML
+          </footer>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

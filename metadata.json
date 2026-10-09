@@ -1,0 +1,6 @@
+{
+  "name": "Bookzine Creator",
+  "description": "Herramienta para crear bookzines y mini-zines imponiendo páginas de un documento PDF en plantillas de 16 páginas (4x4) y 8 páginas (4x2 Canva) para plegado y exportar a PDF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
